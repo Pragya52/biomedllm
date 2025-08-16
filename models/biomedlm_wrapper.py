@@ -10,73 +10,112 @@ class FullBioMedLMWrapper(nn.Module):
     """Wrapper for the full Stanford BioMedLM model with QA capabilities."""
     
     def __init__(
-        self, 
-        model_name: str = "stanford-crfm/BioMedLM",
-        model_revision: str = "main",
-        split_layer: int = 16,
-        qa_format: str = "multiple_choice",
-        max_answer_length: int = 128,
-        cache_dir: str = "./cache"
-    ):
+    self, 
+    model_name: str = "stanford-crfm/BioMedLM",
+    model_revision: str = "main",
+    split_layer: int = 16,
+    qa_format: str = "multiple_choice",
+    max_answer_length: int = 128,
+    cache_dir: str = "./cache"
+):
         super().__init__()
-        
+    
         self.model_name = model_name
         self.model_revision = model_revision
         self.split_layer = split_layer
         self.qa_format = qa_format
         self.max_answer_length = max_answer_length
-        
+        self._is_loaded = False
+    
         logger.info(f"Loading full BioMedLM model: {model_name}")
-        
+    
         try:
-            # Load the full BioMedLM model
+    # Load the full BioMedLM model
+            logger.info(f"Loading full BioMedLM model: {model_name}")
             self.config = AutoConfig.from_pretrained(
-                model_name,
-                revision=model_revision,
-                cache_dir=cache_dir
-            )
-            
+        model_name,
+        revision=model_revision,
+        cache_dir=cache_dir,
+        trust_remote_code=True
+    )
+    
+    # Try loading without device_map first
             self.base_model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                revision=model_revision,
-                config=self.config,
-                cache_dir=cache_dir,
-                torch_dtype=torch.float16,  # Use half precision for memory efficiency
-                device_map="auto"
-            )
-            
+        model_name,
+        revision=model_revision,
+        config=self.config,
+        cache_dir=cache_dir,
+        torch_dtype=torch.float32,  # Changed to float32
+        device_map=None,
+        offload_folder="./offload",
+        trust_remote_code=True,
+        #low_cpu_mem_usage=False
+    )
+    
             self.tokenizer = AutoTokenizer.from_pretrained(
-                model_name,
-                revision=model_revision,
-                cache_dir=cache_dir
-            )
-            
-            # Ensure pad token exists
+        model_name,
+        revision=model_revision,
+        cache_dir=cache_dir,
+        trust_remote_code=True
+    )
+    
+    # Ensure pad token exists
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
-            
+    
             logger.info("Successfully loaded full BioMedLM model")
-            
+    
         except Exception as e:
             logger.error(f"Failed to load BioMedLM: {e}")
-            logger.info("Falling back to GPT-2 for development")
-            
-            # Fallback to GPT-2 for development/testing
-            self.config = AutoConfig.from_pretrained("gpt2")
-            self.base_model = AutoModelForCausalLM.from_pretrained("gpt2")
-            self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
-            
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-        
-        # Model dimensions
+            #logger.info("Falling back to GPT-2 for development")
+
+            try:
+                logger.info("Trying alternative BioMedLM loading method")
+
+                self.base_model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    revision=model_revision,
+                    cache_dir=cache_dir,
+                    torch_dtype=torch.float16,  # Changed to float32
+                    low_cpu_mem_usage=True,
+                    device_map=None,
+                    trust_remote_code=True
+                )
+
+                device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                self.base_model=self.base_model.to(device)
+
+                self.config=self.base_model.config
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    model_name,
+                    trust_remote_code=True
+                )
+
+                if self.tokenizer.pad_token is None:
+                    self.tokenizer.pad_token = self.tokenizer.eos_token
+
+                logger.info("Successfully loaded BioMedLM with alternative method")
+
+            except Exception as e2:
+                logger.error(f"Failed to load BioMedLM with alternative method: {e2}")
+                raise RuntimeError("Could not load BioMedLM model. Please check the model name and revision.")     
+    
+    # Fallback to GPT-2 for development/testing
+        #self.config = AutoConfig.from_pretrained("gpt2")
+        #self.base_model = AutoModelForCausalLM.from_pretrained("gpt2")
+        #self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    
+        #if self.tokenizer.pad_token is None:
+            #self.tokenizer.pad_token = self.tokenizer.eos_token
+    
+    # Model dimensions - ADD THESE LINES
         self.vocab_size = self.config.vocab_size
-        self.hidden_size = self.config.hidden_size
+        self.hidden_size = self.config.hidden_size  # This is the missing line
         self.num_layers = self.config.num_hidden_layers
-        
-        # Create QA-specific heads
+    
+    # Create QA-specific heads
         self._create_qa_heads()
-        
+    
         logger.info(f"Model configuration: {self.num_layers} layers, {self.hidden_size} hidden size")
     
     def _create_qa_heads(self):
@@ -127,6 +166,9 @@ class FullBioMedLMWrapper(nn.Module):
     
     def get_client_components(self) -> Tuple[nn.Module, nn.ModuleList]:
         """Get components for client side (embedding + first layers)."""
+        if not self._is_loaded:
+            raise RuntimeError("Model is not loaded. Please call ensure_loaded() first.")
+        
         embedding = self.get_embedding_layer()
         transformer_layers = self.get_transformer_layers()
         client_layers = transformer_layers[:self.split_layer]
@@ -373,3 +415,31 @@ class FullBioMedLMWrapper(nn.Module):
                 answer = generated_text.strip()
             
             return answer# Federated Learning with BioMedLM - Real Medical QA Implementation
+
+    def ensure_loaded(self, device):
+        """Ensure model is properly loaded and not using meta tensors."""
+        if self._is_loaded:
+            return
+            
+        try:
+            # If model was created with meta device, properly load it
+            if hasattr(self.model, 'parameters') and any(p.is_meta for p in self.model.parameters()):
+                logger.info("Converting meta tensors to actual tensors...")
+                self.model = self.model.to_empty(device=device)
+                
+                # Load state dict if available
+                if hasattr(self, 'checkpoint_path') and self.checkpoint_path:
+                    state_dict = torch.load(self.checkpoint_path, map_location=device)
+                    self.model.load_state_dict(state_dict)
+                else:
+                    # Initialize with random weights if no checkpoint
+                    for param in self.model.parameters():
+                        if param.requires_grad:
+                            torch.nn.init.normal_(param, mean=0, std=0.02)
+            
+            self._is_loaded = True
+            logger.info("Model successfully loaded and ready for use")
+            
+        except Exception as e:
+            logger.error(f"Failed to ensure model is loaded: {e}")
+            raise
