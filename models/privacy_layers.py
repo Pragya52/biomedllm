@@ -1,81 +1,99 @@
-"""Model aggregation for federated learning."""
+"""Privacy-preserving layers for federated learning."""
 
 import torch
+import torch.nn as nn
 import numpy as np
-from typing import Dict, List, Optional, Any
-from threading import Lock
-import logging
+from typing import Tuple, Dict, Any
 
-logger = logging.getLogger(__name__)
+class GaussianNoiseLayer(nn.Module):
+    """Adds Gaussian noise for differential privacy."""
+    
+    def __init__(self, noise_std: float = 0.1):
+        super().__init__()
+        self.noise_std = noise_std
+        self.training = True
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Add Gaussian noise during training."""
+        if self.training and self.noise_std > 0:
+            noise = torch.randn_like(x) * self.noise_std
+            return x + noise
+        return x
+    
+    def set_noise_std(self, noise_std: float):
+        """Update noise standard deviation."""
+        self.noise_std = noise_std
 
-class FedAvgAggregator:
-    """Federated Averaging aggregator for client weights."""
+class QuantizationLayer(nn.Module):
+    """Quantizes tensors to int8 for communication efficiency."""
     
-    def __init__(self, num_clients: int, min_clients: int = 2):
-        self.num_clients = num_clients
-        self.min_clients = min_clients
-        self.client_weights = {}
-        self.lock = Lock()
-        self.round_count = 0
-        
-    def add_client_weights(self, client_id: str, weights: Dict[str, List]) -> Optional[Dict[str, List]]:
-        """Add client weights and return aggregated weights if ready."""
-        
-        with self.lock:
-            # Convert lists back to tensors for aggregation
-            tensor_weights = {
-                name: torch.tensor(weight_list) 
-                for name, weight_list in weights.items()
-            }
-            
-            self.client_weights[client_id] = tensor_weights
-            
-            logger.info(f"Received weights from {client_id}. "
-                       f"Total clients: {len(self.client_weights)}/{self.num_clients}")
-            
-            # Check if we have enough clients to aggregate
-            if len(self.client_weights) >= self.min_clients:
-                aggregated = self._aggregate_weights()
-                self.client_weights.clear()  # Reset for next round
-                self.round_count += 1
-                return aggregated
-            
-            return None
+    def __init__(self, num_bits: int = 8):
+        super().__init__()
+        self.num_bits = num_bits
+        self.qmin = -(2 ** (num_bits - 1))
+        self.qmax = 2 ** (num_bits - 1) - 1
     
-    def _aggregate_weights(self) -> Dict[str, List]:
-        """Perform FedAvg aggregation."""
+    def quantize(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Quantize tensor to int8."""
+        # Calculate scale and zero_point
+        x_min, x_max = x.min(), x.max()
         
-        logger.info(f"Aggregating weights from {len(self.client_weights)} clients")
+        # Avoid division by zero
+        if x_max == x_min:
+            scale = torch.tensor(1.0, dtype=x.dtype, device=x.device)
+            zero_point = torch.tensor(0, dtype=torch.int8, device=x.device)
+        else:
+            scale = (x_max - x_min) / (self.qmax - self.qmin)
+            zero_point = self.qmin - torch.round(x_min / scale)
+            zero_point = torch.clamp(zero_point, self.qmin, self.qmax).to(torch.int8)
         
-        # Get all weight names from first client
-        client_ids = list(self.client_weights.keys())
-        weight_names = list(self.client_weights[client_ids[0]].keys())
+        # Quantize
+        x_q = torch.round(x / scale + zero_point)
+        x_q = torch.clamp(x_q, self.qmin, self.qmax).to(torch.int8)
         
-        aggregated_weights = {}
-        
-        for weight_name in weight_names:
-            # Collect weights from all clients
-            client_weight_list = [
-                self.client_weights[client_id][weight_name] 
-                for client_id in client_ids
-            ]
-            
-            # Stack and average
-            stacked_weights = torch.stack(client_weight_list)
-            avg_weight = torch.mean(stacked_weights, dim=0)
-            
-            # Convert back to list for JSON serialization
-            aggregated_weights[weight_name] = avg_weight.tolist()
-        
-        logger.info(f"Weights aggregated successfully for round {self.round_count}")
-        return aggregated_weights
+        return x_q, scale, zero_point
     
-    def get_aggregation_stats(self) -> Dict[str, Any]:
-        """Get statistics about the aggregation process."""
+    def dequantize(
+        self, 
+        x_q: torch.Tensor, 
+        scale: torch.Tensor, 
+        zero_point: torch.Tensor
+    ) -> torch.Tensor:
+        """Dequantize int8 tensor back to float."""
+        return scale * (x_q.float() - zero_point.float())
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass (no quantization during training)."""
+        return x
+
+class PrivacyManager(nn.Module):
+    """Manages privacy-preserving transformations."""
+    
+    def __init__(self, noise_std: float = 0.1, num_bits: int = 8):
+        super().__init__()
+        self.noise_layer = GaussianNoiseLayer(noise_std)
+        self.quantization_layer = QuantizationLayer(num_bits)
+    
+    def apply_privacy(self, x: torch.Tensor) -> Dict[str, Any]:
+        """Apply noise and quantization for privacy."""
+        # Add Gaussian noise
+        x_noisy = self.noise_layer(x)
+        
+        # Quantize
+        x_q, scale, zero_point = self.quantization_layer.quantize(x_noisy)
         
         return {
-            'total_rounds': self.round_count,
-            'clients_participating': len(self.client_weights),
-            'min_clients_required': self.min_clients,
-            'total_clients_expected': self.num_clients
+            "data": x_q,
+            "scale": scale,
+            "zero_point": zero_point,
+            "shape": x.shape,
+            "dtype": str(x.dtype)
         }
+    
+    def remove_privacy(self, privacy_data: Dict[str, Any]) -> torch.Tensor:
+        """Remove quantization (noise cannot be removed)."""
+        return self.quantization_layer.dequantize(
+            privacy_data["data"],
+            privacy_data["scale"],
+            privacy_data["zero_point"]
+        ).reshape(privacy_data["shape"]).to(privacy_data["dtype"])
