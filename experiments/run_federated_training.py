@@ -5,14 +5,20 @@ import multiprocessing as mp
 from concurrent.futures import ThreadPoolExecutor
 import time
 import os
+import sys
 import json
 from typing import List
 
-from ..config.client_config import ClientConfig
-from ..config.server_config import ServerConfig
-from ..client.federated_client import FederatedQAClient
-from ..server.federated_server import FederatedQAServer
-from ..data.medical_qa_datasets import prepare_medical_qa_data
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config.client_config import ClientConfig
+from config.server_config import ServerConfig
+from client.federated_client import FederatedQAClient
+from server.federated_server import FederatedQAServer
+from data.medical_qa_datasets import prepare_medical_qa_data
+from experiments.evaluate_model import generate_experiment_summary
+
+
 
 def setup_logging(level=logging.INFO):
     """Setup logging configuration."""
@@ -100,6 +106,12 @@ def create_client_configs(args) -> List[ClientConfig]:
 
 def main():
     """Main function to run federated learning with medical QA."""
+    import torch.multiprocessing as mp
+    mp.set_start_method('spawn', force=True)
+
+    if torch.cuda.is_available():
+        torch.cuda.set_device(0)
+        
     parser = argparse.ArgumentParser(description='Federated Learning with BioMedLM for Medical QA')
     
     # Dataset arguments
