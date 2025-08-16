@@ -10,12 +10,12 @@ from typing import Dict, Any, List, Optional
 from threading import Lock
 import json
 
-from ..config.server_config import ServerConfig
-from ..models.biomedlm_wrapper import FullBioMedLMWrapper
-from ..models.split_model import ServerQAModel
-from ..models.privacy_layers import PrivacyManager
-from .model_aggregator import FedAvgAggregator
-from ..utils.metrics import QAMetricsTracker
+from config.server_config import ServerConfig
+from models.biomedlm_wrapper import FullBioMedLMWrapper
+from models.split_model import ServerQAModel
+from models.privacy_layers import PrivacyManager
+from server.model_aggregator import FedAvgAggregator
+from utils.metrics import QAMetricsTracker
 
 logger = logging.getLogger(__name__)
 
