@@ -231,7 +231,7 @@ class QAMetricsTracker:
             'best_f1': best_f1
         }
 
-  def get_convergence_round(self, threshold: float = 0.01) -> Optional[int]:
+    def get_convergence_round(self, threshold: float = 0.01) -> Optional[int]:
         """Get round number where model converged (accuracy change < threshold)."""
         
         if len(self.metrics_history) < 5:  # Need at least 5 rounds to detect convergence
