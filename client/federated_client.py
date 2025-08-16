@@ -7,13 +7,13 @@ from typing import Dict, Any, Optional, Tuple
 from tqdm import tqdm
 import json
 
-from ..config.client_config import ClientConfig
-from ..models.biomedlm_wrapper import FullBioMedLMWrapper
-from ..models.split_model import ClientQAModel
-from ..models.privacy_layers import PrivacyManager
-from ..utils.communication import ClientCommunicator
-from ..utils.metrics import QAMetricsTracker
-from ..data.data_loader import FederatedQADataLoader
+from config.client_config import ClientConfig
+from models.biomedlm_wrapper import FullBioMedLMWrapper
+from models.split_model import ClientQAModel
+from models.privacy_layers import PrivacyManager
+from utils.communication import ClientCommunicator
+from utils.metrics import QAMetricsTracker
+from data.data_loader import FederatedQADataLoader
 
 logger = logging.getLogger(__name__)
 
@@ -93,11 +93,17 @@ class FederatedQAClient:
         with autocast(device_type=self.device.type, enabled=self.scaler is not None):
             
             # Local forward pass for distillation
+            batch_copy = batch.copy()
+            batch_copy.pop('input_ids', None)
+            batch_copy.pop('attention_mask', None)
+
+            batch_for_local = {k: v for k, v in batch.items() if k not in ['input_ids', 'attention_mask']}
+
             local_outputs = self.client_model.forward_local(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                **batch
-            )
+             input_ids=input_ids,
+               attention_mask=attention_mask,
+                  **batch_for_local
+                )
             local_loss = local_outputs.get('loss', torch.tensor(0.0))
             
             # Global path forward pass
@@ -272,7 +278,7 @@ class FederatedQAClient:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
-                torch.nn.utils.clip_grad_norm_(
+                utils.clip_grad_norm_(
                     self.client_model.parameters(), 
                     self.config.max_grad_norm
                 )
