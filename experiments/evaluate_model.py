@@ -5,14 +5,19 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import json
 import os
+import torch.nn as nn
 import argparse
 import logging
 from typing import Dict, Any, List
+import sys
 from sklearn.metrics import classification_report, confusion_matrix
+from models.biomedlm_wrapper import FullBioMedLMWrapper
 
-from ..config.client_config import ClientConfig
-from ..client.federated_client import FederatedQAClient
-from ..utils.metrics import QAMetricsTracker
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config.client_config import ClientConfig
+from client.federated_client import FederatedQAClient
+from utils.metrics import QAMetricsTracker
 
 logger = logging.getLogger(__name__)
 
@@ -350,8 +355,13 @@ class MedicalQAEvaluator:
         plt.close()
 
 def generate_experiment_summary(results_dir: str, num_clients: int):
-    """Generate comprehensive experiment summary."""
     
+    import numpy as np
+    import json
+    import os
+    import logging
+    
+    logger = logging.getLogger(__name__)
     logger.info("Generating experiment summary...")
     
     # Collect all client results
@@ -451,100 +461,28 @@ def generate_experiment_summary(results_dir: str, num_clients: int):
         perf = summary['performance_summary']
         print(f"Average Final Accuracy: {perf['avg_final_accuracy']:.3f} ± {perf['std_final_accuracy']:.3f}")
         print(f"Best Client Accuracy: {perf['max_final_accuracy']:.3f}")
-        print(f"Worst Client Accuracy: {        elif self.qa_format == "extractive":
-            return nn.ModuleDict({
-                'start_head': nn.Linear(self.hidden_size, 1),
-                'end_head': nn.Linear(self.hidden_size, 1)
-            })
-        else:  # generative
-            return nn.Linear(self.hidden_size, self.biomedlm_wrapper.vocab_size)
+        print(f"Worst Client Accuracy: {perf['min_final_accuracy']:.3f}")
+        
+        if perf['avg_final_f1'] > 0:
+            print(f"Average F1 Score: {perf['avg_final_f1']:.3f}")
     
-    def forward_local(
-        self, 
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        **kwargs
-    ) -> Dict[str, torch.Tensor]:
-        """Local forward pass for knowledge distillation."""
-        
-        # Get embeddings
-        hidden_states = self.embedding(input_ids)
-        
-        # Apply local processing layers
-        for layer in self.local_processor:
-            if attention_mask is not None:
-                # Create attention mask for transformer layer
-                extended_mask = attention_mask.unsqueeze(1).unsqueeze(1)
-                extended_mask = extended_mask.expand(-1, -1, attention_mask.size(-1), -1)
-                extended_mask = (1.0 - extended_mask) * -10000.0
-            else:
-                extended_mask = None
-            
-            hidden_states = layer(hidden_states, src_key_padding_mask=extended_mask)
-        
-        # Apply local QA head
-        return self._apply_local_qa_head(hidden_states, **kwargs)
+    if 'convergence_analysis' in summary and summary['convergence_analysis']:
+        conv = summary['convergence_analysis']
+        print(f"\nConvergence Analysis:")
+        print(f"Average Rounds to Convergence: {conv['avg_rounds_to_convergence']:.1f}")
+        print(f"Convergence Rate: {conv['convergence_rate']:.1%}")
     
-    def forward_global_path(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        """Forward pass for global path (to be sent to server)."""
-        return self.biomedlm_wrapper.forward_client_side(input_ids, attention_mask)
+    if 'federated_insights' in summary and summary['federated_insights']:
+        fed = summary['federated_insights']
+        print(f"\nFederated Learning Insights:")
+        print(f"Performance Heterogeneity: {fed['performance_heterogeneity']}")
+        print(f"Federation Effectiveness: {fed['federation_effectiveness']}")
     
-    def _apply_local_qa_head(
-        self, 
-        hidden_states: torch.Tensor, 
-        labels: Optional[torch.Tensor] = None,
-        **kwargs
-    ) -> Dict[str, torch.Tensor]:
-        """Apply local QA head based on format."""
-        
-        if self.qa_format == "multiple_choice":
-            # Pool and classify
-            pooled_output = hidden_states.mean(dim=1)
-            logits = self.local_qa_head(pooled_output)
-            
-            outputs = {"logits": logits}
-            
-            if labels is not None:
-                loss_fct = nn.CrossEntropyLoss()
-                loss = loss_fct(logits, labels)
-                outputs["loss"] = loss
-            
-            return outputs
-            
-        elif self.qa_format == "extractive":
-            # Extract spans
-            start_logits = self.local_qa_head['start_head'](hidden_states).squeeze(-1)
-            end_logits = self.local_qa_head['end_head'](hidden_states).squeeze(-1)
-            
-            outputs = {
-                "start_logits": start_logits,
-                "end_logits": end_logits
-            }
-            
-            if 'start_positions' in kwargs and 'end_positions' in kwargs:
-                loss_fct = nn.CrossEntropyLoss()
-                start_loss = loss_fct(start_logits, kwargs['start_positions'])
-                end_loss = loss_fct(end_logits, kwargs['end_positions'])
-                outputs["loss"] = (start_loss + end_loss) / 2
-            
-            return outputs
-            
-        else:  # generative
-            logits = self.local_qa_head(hidden_states)
-            outputs = {"logits": logits}
-            
-            if labels is not None:
-                loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous()
-                loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-                outputs["loss"] = loss
-            
-            return outputs
+    print("="*60)
+    
+    
+    
+    
     
     def get_head_weights(self) -> Dict[str, torch.Tensor]:
         """Get embedding weights for FedAvg."""
@@ -575,14 +513,4 @@ class ServerQAModel(nn.Module):
         
         logger.info(f"Initialized server model for {self.qa_format} QA")
     
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
-        **kwargs
-    ) -> Dict[str, torch.Tensor]:
-        """Server forward pass."""
-        return self.biomedlm_wrapper.forward_server_side(
-            hidden_states, attention_mask, labels, **kwargs
-        )
+    
