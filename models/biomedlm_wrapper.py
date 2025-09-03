@@ -1,122 +1,170 @@
+"""
+BiomedLLM Wrapper using GPT4All from ModelScope
+Updated implementation replacing Stanford BioMedLM with GPT4All model
+"""
+
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+from modelscope import snapshot_download
 from typing import Optional, Tuple, Dict, Any, Union
 import logging
 
 logger = logging.getLogger(__name__)
 
+
 class FullBioMedLMWrapper(nn.Module):
-    """Wrapper for the full Stanford BioMedLM model with QA capabilities."""
+    """Wrapper for the GPT4All model with QA capabilities from ModelScope."""
     
     def __init__(
-    self, 
-    model_name: str = "stanford-crfm/BioMedLM",
-    model_revision: str = "main",
-    split_layer: int = 16,
-    qa_format: str = "multiple_choice",
-    max_answer_length: int = 128,
-    cache_dir: str = "./cache"
-):
+        self, 
+        model_name: str = 'Genius-Society/gpt4all',
+        model_revision: str = "main",
+        split_layer: int = 16,
+        qa_format: str = "multiple_choice",
+        max_answer_length: int = 128,
+        cache_dir: str = "./cache"
+    ):
         super().__init__()
-    
+        
         self.model_name = model_name
         self.model_revision = model_revision
         self.split_layer = split_layer
         self.qa_format = qa_format
         self.max_answer_length = max_answer_length
         self._is_loaded = False
-    
-        logger.info(f"Loading full BioMedLM model: {model_name}")
-    
+        
+        logger.info(f"Loading GPT4All model from ModelScope: {model_name}")
+        
         try:
-    # Load the full BioMedLM model
-            logger.info(f"Loading full BioMedLM model: {model_name}")
+            # First try to download from ModelScope
+            logger.info(f"Attempting to download GPT4All model from ModelScope: {model_name}")
+            self.model_dir = snapshot_download(
+                self.model_name,
+                revision=model_revision,
+                cache_dir=cache_dir
+            )
+            
+            logger.info(f"Model downloaded to: {self.model_dir}")
+            
+            # Load config first
             self.config = AutoConfig.from_pretrained(
-        model_name,
-        revision=model_revision,
-        cache_dir=cache_dir,
-        trust_remote_code=True
-    )
-    
-    # Try loading without device_map first
+                self.model_dir,
+                trust_remote_code=True
+            )
+            
+            # Load the GPT4All model
             self.base_model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        revision=model_revision,
-        config=self.config,
-        cache_dir=cache_dir,
-        torch_dtype=torch.float32,  # Changed to float32
-        device_map=None,
-        offload_folder="./offload",
-        trust_remote_code=True,
-        #low_cpu_mem_usage=False
-    )
-    
+                self.model_dir,
+                config=self.config,
+                torch_dtype=torch.float32,
+                device_map=None,
+                trust_remote_code=True,
+                low_cpu_mem_usage=False
+            )
+            
             self.tokenizer = AutoTokenizer.from_pretrained(
-        model_name,
-        revision=model_revision,
-        cache_dir=cache_dir,
-        trust_remote_code=True
-    )
-    
-    # Ensure pad token exists
+                self.model_dir,
+                trust_remote_code=True
+            )
+            
+            # Ensure pad token exists
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
-    
-            logger.info("Successfully loaded full BioMedLM model")
-    
+            
+            logger.info("Successfully loaded GPT4All model from ModelScope")
+            
         except Exception as e:
-            logger.error(f"Failed to load BioMedLM: {e}")
-            #logger.info("Falling back to GPT-2 for development")
-
+            logger.error(f"Failed to load GPT4All from ModelScope: {e}")
+            logger.info("Falling back to Hugging Face Hub...")
+            
             try:
-                logger.info("Trying alternative BioMedLM loading method")
-
-                self.base_model = AutoModelForCausalLM.from_pretrained(
-                    model_name,
+                # Fallback: Load directly from Hugging Face
+                logger.info("Loading GPT4All model directly from Hugging Face...")
+                
+                self.config = AutoConfig.from_pretrained(
+                    self.model_name,
                     revision=model_revision,
                     cache_dir=cache_dir,
-                    torch_dtype=torch.float16,  # Changed to float32
-                    low_cpu_mem_usage=True,
+                    trust_remote_code=True
+                )
+                
+                self.base_model = AutoModelForCausalLM.from_pretrained(
+                    self.model_name,
+                    revision=model_revision,
+                    config=self.config,
+                    cache_dir=cache_dir,
+                    torch_dtype=torch.float32,
                     device_map=None,
-                    trust_remote_code=True
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=False
                 )
-
-                device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
-                self.base_model=self.base_model.to(device)
-
-                self.config=self.base_model.config
+                
                 self.tokenizer = AutoTokenizer.from_pretrained(
-                    model_name,
+                    self.model_name,
+                    revision=model_revision,
+                    cache_dir=cache_dir,
                     trust_remote_code=True
                 )
-
+                
+                # Ensure pad token exists
                 if self.tokenizer.pad_token is None:
                     self.tokenizer.pad_token = self.tokenizer.eos_token
-
-                logger.info("Successfully loaded BioMedLM with alternative method")
-
+                
+                # Set model_dir for consistency
+                self.model_dir = self.model_name
+                
+                logger.info("Successfully loaded GPT4All model from Hugging Face")
+                
             except Exception as e2:
-                logger.error(f"Failed to load BioMedLM with alternative method: {e2}")
-                raise RuntimeError("Could not load BioMedLM model. Please check the model name and revision.")     
-    
-    # Fallback to GPT-2 for development/testing
-        #self.config = AutoConfig.from_pretrained("gpt2")
-        #self.base_model = AutoModelForCausalLM.from_pretrained("gpt2")
-        #self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
-    
-        #if self.tokenizer.pad_token is None:
-            #self.tokenizer.pad_token = self.tokenizer.eos_token
-    
-    # Model dimensions - ADD THESE LINES
+                logger.error(f"Failed to load GPT4All from Hugging Face: {e2}")
+                
+                try:
+                    logger.info("Trying alternative GPT4All loading method with float16...")
+                    
+                    self.base_model = AutoModelForCausalLM.from_pretrained(
+                        self.model_name,
+                        revision=model_revision,
+                        cache_dir=cache_dir,
+                        torch_dtype=torch.float16,
+                        low_cpu_mem_usage=True,
+                        device_map=None,
+                        trust_remote_code=True
+                    )
+                    
+                    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                    self.base_model = self.base_model.to(device)
+                    
+                    self.config = self.base_model.config
+                    self.tokenizer = AutoTokenizer.from_pretrained(
+                        self.model_name,
+                        revision=model_revision,
+                        cache_dir=cache_dir,
+                        trust_remote_code=True
+                    )
+                    
+                    if self.tokenizer.pad_token is None:
+                        self.tokenizer.pad_token = self.tokenizer.eos_token
+                    
+                    # Set model_dir for consistency
+                    self.model_dir = self.model_name
+                    
+                    logger.info("Successfully loaded GPT4All with alternative method")
+                    
+                except Exception as e3:
+                    logger.error(f"Failed to load GPT4All with alternative method: {e3}")
+                    raise RuntimeError("Could not load GPT4All model. Please check the model name and ensure it's available on ModelScope or Hugging Face.")
+        
+        # Model dimensions
         self.vocab_size = self.config.vocab_size
-        self.hidden_size = self.config.hidden_size  # This is the missing line
-        self.num_layers = self.config.num_hidden_layers
-    
-    # Create QA-specific heads
+        self.hidden_size = getattr(self.config, 'hidden_size', getattr(self.config, 'n_embd', 768))
+        self.num_layers = getattr(self.config, 'num_hidden_layers', getattr(self.config, 'n_layer', 12))
+        
+        # Create QA-specific heads
         self._create_qa_heads()
-    
-        logger.info(f"Model configuration: {self.num_layers} layers, {self.hidden_size} hidden size")
+        
+        logger.info(f"GPT4All configuration: {self.num_layers} layers, {self.hidden_size} hidden size")
+
     
     def _create_qa_heads(self):
         """Create task-specific heads for different QA formats."""
@@ -145,7 +193,7 @@ class FullBioMedLMWrapper(nn.Module):
     def get_embedding_layer(self) -> nn.Module:
         """Get the token embedding layer."""
         if hasattr(self.base_model, 'transformer'):
-            return self.base_model.transformer.wte  # GPT-2 style
+            return self.base_model.transformer.wte  # GPT-2/GPT4All style
         elif hasattr(self.base_model, 'model'):
             return self.base_model.model.embed_tokens  # LLaMA style
         else:
@@ -158,7 +206,7 @@ class FullBioMedLMWrapper(nn.Module):
     def get_transformer_layers(self) -> nn.ModuleList:
         """Get transformer layers."""
         if hasattr(self.base_model, 'transformer'):
-            return self.base_model.transformer.h  # GPT-2 style
+            return self.base_model.transformer.h  # GPT-2/GPT4All style
         elif hasattr(self.base_model, 'model'):
             return self.base_model.model.layers  # LLaMA style
         else:
@@ -188,197 +236,6 @@ class FullBioMedLMWrapper(nn.Module):
             head = self.qa_generator
         
         return server_layers, head
-    
-    def forward_client_side(
-        self, 
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        """Forward pass for client side (embedding + first layers)."""
-        
-        # Get embedding
-        embedding_layer = self.get_embedding_layer()
-        hidden_states = embedding_layer(input_ids)
-        
-        # Apply positional embeddings if they exist
-        if hasattr(self.base_model, 'transformer') and hasattr(self.base_model.transformer, 'wpe'):
-            position_ids = torch.arange(0, input_ids.size(-1), dtype=torch.long, device=input_ids.device)
-            position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
-            position_embeds = self.base_model.transformer.wpe(position_ids)
-            hidden_states = hidden_states + position_embeds
-        
-        # Apply first transformer layers
-        transformer_layers = self.get_transformer_layers()
-        
-        for i in range(self.split_layer):
-            layer = transformer_layers[i]
-            
-            if attention_mask is not None:
-                # Create causal mask for GPT-style models
-                seq_len = input_ids.size(-1)
-                causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=input_ids.device))
-                causal_mask = causal_mask.bool()
-                
-                # Combine with attention mask
-                combined_mask = attention_mask.unsqueeze(1).unsqueeze(1) * causal_mask
-            else:
-                combined_mask = None
-            
-            # Forward through layer
-            if hasattr(layer, '__call__'):
-                if combined_mask is not None:
-                    hidden_states = layer(hidden_states, attention_mask=combined_mask)[0]
-                else:
-                    hidden_states = layer(hidden_states)[0]
-            else:
-                hidden_states = layer(hidden_states)
-        
-        return hidden_states
-    
-    def forward_server_side(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
-        **kwargs
-    ) -> Dict[str, torch.Tensor]:
-        """Forward pass for server side (remaining layers + QA head)."""
-        
-        # Apply remaining transformer layers
-        transformer_layers = self.get_transformer_layers()
-        
-        for i in range(self.split_layer, self.num_layers):
-            layer = transformer_layers[i]
-            
-            if attention_mask is not None:
-                seq_len = hidden_states.size(1)
-                causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=hidden_states.device))
-                causal_mask = causal_mask.bool()
-                combined_mask = attention_mask.unsqueeze(1).unsqueeze(1) * causal_mask
-            else:
-                combined_mask = None
-            
-            # Forward through layer
-            if hasattr(layer, '__call__'):
-                if combined_mask is not None:
-                    hidden_states = layer(hidden_states, attention_mask=combined_mask)[0]
-                else:
-                    hidden_states = layer(hidden_states)[0]
-            else:
-                hidden_states = layer(hidden_states)
-        
-        # Apply final layer norm if it exists
-        if hasattr(self.base_model, 'transformer') and hasattr(self.base_model.transformer, 'ln_f'):
-            hidden_states = self.base_model.transformer.ln_f(hidden_states)
-        elif hasattr(self.base_model, 'model') and hasattr(self.base_model.model, 'norm'):
-            hidden_states = self.base_model.model.norm(hidden_states)
-        
-        # Apply QA-specific head
-        return self._apply_qa_head(hidden_states, labels, **kwargs)
-    
-    def _apply_qa_head(
-        self, 
-        hidden_states: torch.Tensor, 
-        labels: Optional[torch.Tensor] = None,
-        **kwargs
-    ) -> Dict[str, torch.Tensor]:
-        """Apply QA-specific head based on format."""
-        
-        if self.qa_format == "multiple_choice":
-            return self._apply_multiple_choice_head(hidden_states, labels, **kwargs)
-        elif self.qa_format == "extractive":
-            return self._apply_extractive_head(hidden_states, labels, **kwargs)
-        else:  # generative
-            return self._apply_generative_head(hidden_states, labels)
-    
-    def _apply_multiple_choice_head(
-        self, 
-        hidden_states: torch.Tensor, 
-        labels: Optional[torch.Tensor] = None,
-        choice_input_ids: Optional[torch.Tensor] = None,
-        **kwargs
-    ) -> Dict[str, torch.Tensor]:
-        """Apply multiple choice classification head."""
-        
-        # Pool hidden states (use last token or mean pooling)
-        pooled_output = hidden_states.mean(dim=1)  # Mean pooling
-        
-        # For multiple choice, we need to score each choice
-        if choice_input_ids is not None:
-            batch_size, num_choices, seq_len = choice_input_ids.shape
-            
-            # Reshape for processing
-            choice_hidden = hidden_states.view(batch_size * num_choices, -1, hidden_states.size(-1))
-            choice_pooled = choice_hidden.mean(dim=1)
-            
-            # Score each choice
-            choice_scores = self.qa_classifier(choice_pooled)  # [batch*choices, 1]
-            logits = choice_scores.view(batch_size, num_choices)  # [batch, choices]
-        else:
-            # Single sequence classification
-            logits = self.qa_classifier(pooled_output)
-        
-        outputs = {"logits": logits}
-        
-        if labels is not None:
-            loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(logits, labels)
-            outputs["loss"] = loss
-        
-        return outputs
-    
-    def _apply_extractive_head(
-        self, 
-        hidden_states: torch.Tensor, 
-        labels: Optional[torch.Tensor] = None,
-        start_positions: Optional[torch.Tensor] = None,
-        end_positions: Optional[torch.Tensor] = None,
-        **kwargs
-    ) -> Dict[str, torch.Tensor]:
-        """Apply extractive QA heads for span extraction."""
-        
-        # Get start and end logits
-        start_logits = self.qa_start_head(hidden_states).squeeze(-1)
-        end_logits = self.qa_end_head(hidden_states).squeeze(-1)
-        
-        outputs = {
-            "start_logits": start_logits,
-            "end_logits": end_logits
-        }
-        
-        if start_positions is not None and end_positions is not None:
-            # Calculate loss
-            loss_fct = nn.CrossEntropyLoss()
-            start_loss = loss_fct(start_logits, start_positions)
-            end_loss = loss_fct(end_logits, end_positions)
-            total_loss = (start_loss + end_loss) / 2
-            outputs["loss"] = total_loss
-        
-        return outputs
-    
-    def _apply_generative_head(
-        self, 
-        hidden_states: torch.Tensor, 
-        labels: Optional[torch.Tensor] = None
-    ) -> Dict[str, torch.Tensor]:
-        """Apply generative language modeling head."""
-        
-        # Apply language modeling head
-        logits = self.qa_generator(hidden_states)
-        
-        outputs = {"logits": logits}
-        
-        if labels is not None:
-            # Shift labels for causal language modeling
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            
-            # Calculate loss
-            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-            outputs["loss"] = loss
-        
-        return outputs
     
     def generate_answer(
         self,
@@ -414,8 +271,8 @@ class FullBioMedLMWrapper(nn.Module):
             else:
                 answer = generated_text.strip()
             
-            return answer# Federated Learning with BioMedLM - Real Medical QA Implementation
-
+            return answer
+    
     def ensure_loaded(self, device):
         """Ensure model is properly loaded and not using meta tensors."""
         if self._is_loaded:
@@ -423,23 +280,130 @@ class FullBioMedLMWrapper(nn.Module):
             
         try:
             # If model was created with meta device, properly load it
-            if hasattr(self.model, 'parameters') and any(p.is_meta for p in self.model.parameters()):
+            if hasattr(self.base_model, 'parameters') and any(p.is_meta for p in self.base_model.parameters()):
                 logger.info("Converting meta tensors to actual tensors...")
-                self.model = self.model.to_empty(device=device)
+                self.base_model = self.base_model.to_empty(device=device)
                 
                 # Load state dict if available
                 if hasattr(self, 'checkpoint_path') and self.checkpoint_path:
                     state_dict = torch.load(self.checkpoint_path, map_location=device)
-                    self.model.load_state_dict(state_dict)
+                    self.base_model.load_state_dict(state_dict)
                 else:
                     # Initialize with random weights if no checkpoint
-                    for param in self.model.parameters():
+                    for param in self.base_model.parameters():
                         if param.requires_grad:
                             torch.nn.init.normal_(param, mean=0, std=0.02)
             
             self._is_loaded = True
-            logger.info("Model successfully loaded and ready for use")
+            logger.info("GPT4All model successfully loaded and ready for use")
             
         except Exception as e:
-            logger.error(f"Failed to ensure model is loaded: {e}")
+            logger.error(f"Failed to ensure GPT4All model is loaded: {e}")
             raise
+    
+    # Additional utility methods for GPT4All integration
+    def encode_text(self, text: str, max_length: int = 512) -> torch.Tensor:
+        """Encode text into tokens using GPT4All tokenizer."""
+        return self.tokenizer.encode(
+            text,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=max_length
+        )
+    
+    def decode_tokens(self, tokens: torch.Tensor, skip_special_tokens: bool = True) -> str:
+        """Decode tokens back to text using GPT4All tokenizer."""
+        return self.tokenizer.decode(tokens, skip_special_tokens=skip_special_tokens)
+    
+    def generate_text(
+        self,
+        prompt: str,
+        max_new_tokens: int = 100,
+        temperature: float = 0.7,
+        do_sample: bool = True,
+        **kwargs
+    ) -> str:
+        """Generate text using GPT4All model."""
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        
+        with torch.no_grad():
+            outputs = self.base_model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=do_sample,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+                **kwargs
+            )
+        
+        generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        # Remove the input prompt from the generated text
+        generated_text = generated_text[len(prompt):].strip()
+        
+        return generated_text
+    
+    def get_model_info(self) -> Dict[str, Any]:
+        """Get information about the loaded GPT4All model."""
+        return {
+            "model_name": self.model_name,
+            "model_dir": getattr(self, 'model_dir', 'Not available'),
+            "vocab_size": self.vocab_size,
+            "hidden_size": self.hidden_size,
+            "num_layers": self.num_layers,
+            "qa_format": self.qa_format,
+            "split_layer": self.split_layer,
+            "max_answer_length": self.max_answer_length
+        }
+
+
+# Example usage and testing
+if __name__ == "__main__":
+    # Initialize the wrapper with GPT4All
+    wrapper = FullBioMedLMWrapper(
+        model_name='Genius-Society/gpt4all',
+        qa_format="generative",
+        split_layer=8,
+        cache_dir="./models"
+    )
+    
+    # Test text generation
+    prompt = "The symptoms of diabetes include"
+    generated_text = wrapper.generate_text(
+        prompt,
+        max_new_tokens=100,
+        temperature=0.8
+    )
+    
+    print(f"Prompt: {prompt}")
+    print(f"Generated: {generated_text}")
+    
+    # Test QA functionality
+    qa_prompt = "Question: What are the main symptoms of diabetes? Answer:"
+    inputs = wrapper.tokenizer(qa_prompt, return_tensors="pt")
+    
+    answer = wrapper.generate_answer(
+        input_ids=inputs['input_ids'],
+        attention_mask=inputs.get('attention_mask'),
+        max_new_tokens=128
+    )
+    
+    print(f"\nQA Prompt: {qa_prompt}")
+    print(f"Answer: {answer}")
+    
+    # Get model info
+    model_info = wrapper.get_model_info()
+    print(f"\nModel Info: {model_info}")
+    
+    # Test federated learning components
+    try:
+        client_embedding, client_layers = wrapper.get_client_components()
+        server_layers, server_head = wrapper.get_server_components()
+        print(f"\nFederated Learning Setup:")
+        print(f"Client layers: {len(client_layers)}")
+        print(f"Server layers: {len(server_layers)}")
+        print(f"QA format: {wrapper.qa_format}")
+    except Exception as e:
+        print(f"Federated learning setup error: {e}")
+        print("Make sure to call ensure_loaded() first if needed")
