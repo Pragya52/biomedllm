@@ -85,6 +85,38 @@ class FederatedQAClient:
         # Move batch to device
         batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
                 for k, v in batch.items()}
+                
+        if 'labels' in batch:
+          labels = batch['labels']
+          print(f"Label shape: {labels.shape}")
+          print(f"Label values: {labels}")
+          print(f"Label min: {labels.min().item()}, max: {labels.max().item()}")
+          print(f"Label dtype: {labels.dtype}")
+        
+        # Fix labels if needed
+        if labels.min() < 0 or labels.max() >= 4:
+          print("WARNING: Invalid labels detected!")
+            # Option 1: Clamp labels
+          batch['labels'] = torch.clamp(labels, 0, 3)
+            # Option 2: Convert 1-indexed to 0-indexed  
+            # batch['labels'] = labels - 1
+    
+    # Extract common inputs
+        input_ids = batch['input_ids']
+        attention_mask = batch.get('attention_mask')
+    
+        with autocast(device_type=self.device.type, enabled=self.scaler is not None):
+        
+        # Local forward pass for distillation
+            batch_for_local = {k: v for k, v in batch.items() 
+                          if k not in ['input_ids', 'attention_mask']}
+
+            local_outputs = self.client_model.forward_local(
+            input_ids=input_ids,
+           attention_mask=attention_mask,
+              **batch_for_local
+            )
+        local_loss = local_outputs.get('loss', torch.tensor(0.0))
         
         # Extract common inputs
         input_ids = batch['input_ids']
@@ -212,7 +244,16 @@ class FederatedQAClient:
     
     def local_training_epoch(self) -> Dict[str, float]:
         """Perform one epoch of local training with gradient accumulation."""
-        
+        #batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
+            #for k, v in batch.items()}
+    
+    # FIX: Convert attention mask to correct dtype for mixed precision
+        #if 'attention_mask' in batch and self.config.mixed_precision:
+           #batch['attention_mask'] = batch['attention_mask'].to(dtype=torch.bool)
+    
+    # Extract inputs
+        #input_ids = batch['input_ids']
+        #attention_mask = batch.get('attention_mask')
         epoch_metrics = {
             'local_loss': 0.0, 
             'distillation_loss': 0.0, 
@@ -425,3 +466,16 @@ class FederatedQAClient:
                 self.participate_in_fedavg()
         
         return training_history
+
+    def create_split_model(config, device):
+    # Create biomedlm wrapper
+        biomedlm_wrapper = FullBioMedLMWrapper(config)
+    
+    # Create split model with device parameter
+        split_model = SplitModel(
+        biomedlm_wrapper=biomedlm_wrapper,
+        local_layers=config.local_layers,
+        client_id=config.client_id,
+        device=device  # Pass device here
+    )
+
